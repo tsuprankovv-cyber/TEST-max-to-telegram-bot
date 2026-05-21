@@ -1,6 +1,7 @@
 import json
 import time
 import asyncio
+import os
 import aiohttp
 from typing import Dict, Optional, List
 from config.settings import TG_TOKEN, TG_CHAT
@@ -70,8 +71,13 @@ class TelegramClient:
         logger.info(f"Sending document: {file_path}")
         form = aiohttp.FormData()
         form.add_field('chat_id', chat_id)
+        
+        # Читаем файл в память перед отправкой, чтобы избежать "I/O operation on closed file"
         with open(file_path, 'rb') as f:
-            form.add_field('document', f, filename=file_path)
+            file_data = f.read()
+        
+        filename = os.path.basename(file_path)
+        form.add_field('document', file_data, filename=filename)
         resp = await self._request('sendDocument', data=form)
         return resp and resp.get('ok', False)
 
