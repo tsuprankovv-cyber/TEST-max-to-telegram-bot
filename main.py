@@ -2,11 +2,11 @@ import os
 import sys
 import asyncio
 from aiohttp import web
-from config.settings import RENDER_EXTERNAL_URL, PORT, TG_CHAT, MAX_CHAN
+from config.settings import RENDER_EXTERNAL_URL, PORT, TG_CHAT, MAX_CHAN, TG_TOKEN, ADMIN_TG_ID
 from config.logging_config import setup_logging, get_logger, LOG_LEVEL, LOG_RAW_MAX, LOG_RAW_TG, LOG_MARKUP, LOG_MEDIA
 from clients.max_client import MaxClient
 from core.server import create_app
-from config.settings import MAX_WEBHOOK_SECRET, ADMIN_TG_ID
+from config.settings import MAX_WEBHOOK_SECRET
 
 logger = get_logger(__name__)
 
@@ -43,39 +43,90 @@ def log_structure():
     
     logger.info("=" * 80)
 
+async def telegram_polling():
+    """Фоновый опрос Telegram API для команд."""
+    from handlers.commands import handle_logs_command, handle_status_command, handle_logs_callback
+    import aiohttp
+    
+    logger.info("📡 Starting Telegram polling for commands...")
+    await asyncio.sleep(2)
+    
+    offset = 0
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+                    params={"offset": offset, "timeout": 30},
+                    timeout=aiohttp.ClientTimeout(total=35)
+                ) as r:
+                    if r.status != 200:
+                        continue
+                    data = await r.json()
+                    if not data.get('ok'):
+                        continue
+                    
+                    for update in data['result']:
+                        offset = update['update_id'] + 1
+                        
+                        if 'message' in update:
+                            msg = update['message']
+                            chat_id = str(msg.get('chat', {}).get('id', ''))
+                            text = msg.get('text', '')
+                            
+                            if not ADMIN_TG_ID or chat_id != ADMIN_TG_ID:
+                                logger.info(f"[POLLING] ⏭ Ignored message from {chat_id} (not admin)")
+                                continue
+                            
+                            logger.info(f"[POLLING] 📨 Command: {text}")
+                            if text == '/logs':
+                                await handle_logs_command(chat_id)
+                            elif text == '/status':
+                                await handle_status_command(chat_id)
+                        
+                        elif 'callback_query' in update:
+                            callback = update['callback_query']
+                            logger.info(f"[POLLING] 🎯 Callback: {callback.get('data', '')}")
+                            await handle_logs_callback(callback)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"[POLLING] Error: {e}")
+            await asyncio.sleep(5)
+
 async def main():
     setup_logging()
     
     logger.info("=" * 100)
-    logger.info("🚀 MAX → TELEGRAM FORWARDER [MODULAR]")
+    logger.info("🚀 MAX → TELEGRAM FORWARDER [MODULAR v3]")
     logger.info("=" * 100)
     logger.info(f"📡 MAX Channel: {MAX_CHAN}")
     logger.info(f"📥 Telegram Chat: {TG_CHAT}")
     logger.info(f"👤 Admin TG ID: {ADMIN_TG_ID}")
     logger.info(f"📊 LOG_LEVEL: {LOG_LEVEL}")
-    logger.info(f"📊 LOG_RAW_MAX: {LOG_RAW_MAX}")
-    logger.info(f"📊 LOG_RAW_TG: {LOG_RAW_TG}")
-    logger.info(f"📊 LOG_MARKUP: {LOG_MARKUP}")
-    logger.info(f"📊 LOG_MEDIA: {LOG_MEDIA}")
     logger.info(f"🔗 Webhook URL: {RENDER_EXTERNAL_URL}/webhook" if RENDER_EXTERNAL_URL else "⚠️ RENDER_EXTERNAL_URL not set")
     logger.info("=" * 100)
     
-    # Проверка структуры модулей
     log_structure()
 
+    # Регистрация MAX webhook
     mx = MaxClient()
     if RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
         success = await mx.register_webhook(webhook_url, MAX_WEBHOOK_SECRET)
-        logger.info(f"📡 Webhook registration: {'✅ OK' if success else '❌ FAILED'}")
+        logger.info(f"📡 MAX Webhook: {'✅ OK' if success else '❌ FAILED'}")
 
+    # Запуск Telegram polling для команд
+    asyncio.create_task(telegram_polling())
+
+    # Запуск веб-сервера
     app = await create_app()
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', PORT).start()
 
     logger.info(f"🌐 Server running on port {PORT}")
-    logger.info("✅ Ready to receive messages!")
+    logger.info("✅ Ready!")
     logger.info("=" * 100)
 
     await asyncio.Event().wait()
