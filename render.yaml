@@ -22,8 +22,6 @@ services:
         generateValue: true
       - key: VERIFY_WEBHOOK_SECRET
         value: "1"
-      - key: POLL_INTERVAL
-        value: "15"
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: LOG_LEVEL
@@ -36,3 +34,5 @@ services:
         value: "1"
       - key: LOG_MEDIA
         value: "1"
+      - key: ADMIN_TG_ID
+        sync: false
