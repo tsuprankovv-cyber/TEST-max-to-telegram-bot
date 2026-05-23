@@ -15,7 +15,9 @@ MAX_TAG_MAP = {
     "link": "a", "text_link": "a", "url": "a",
 }
 
-TAG_ORDER = {'a': 1, 'u': 2, 's': 3, 'b': 4, 'i': 5, 'code': 6, 'pre': 7, 'tg-spoiler': 8}
+# Приоритет тегов: чем МЕНЬШЕ число, тем ВЫШЕ приоритет (внешний тег)
+TAG_PRIORITY = {'a': 1, 'u': 2, 's': 3, 'b': 4, 'i': 5, 'code': 6, 'pre': 7, 'tg-spoiler': 8}
+
 
 def parse_markdown_to_html(text: str) -> str:
     if not text:
@@ -30,6 +32,15 @@ def parse_markdown_to_html(text: str) -> str:
 
 
 def apply_markup(text: str, markup: List[Dict]) -> str:
+    """
+    Конвертирует разметку MAX в HTML Telegram.
+    
+    Алгоритм:
+    1. Собираем все границы (точки, где меняется набор активных тегов)
+    2. Разбиваем текст на сегменты по этим границам
+    3. Для каждого сегмента определяем активные теги
+    4. Оборачиваем сегмент в теги, сортируя по приоритету (внешние → внутренние)
+    """
     if not markup or not text:
         return text
 
@@ -44,90 +55,73 @@ def apply_markup(text: str, markup: List[Dict]) -> str:
         entity = entity.copy()
         max_offset = entity.get('from', 0)
         max_length = entity.get('length', 0)
+        if max_length <= 0:
+            continue
         python_offset, python_length = normalize_max_offset(text, max_offset, max_length)
         entity['from'] = python_offset
         entity['length'] = python_length
         corrected_markup.append(entity)
 
-    # Создаём события: (позиция, тип_тега, url, действие)
-    # действие: +1 = открыть, -1 = закрыть
-    events = []
+    if not corrected_markup:
+        return text
+
+    # === Шаг 1: Собираем все границы ===
+    boundaries = set()
+    boundaries.add(0)
+    boundaries.add(len(text))
+
     for entity in corrected_markup:
-        offset = entity.get('from', 0)
-        length = entity.get('length', 0)
-        etype = entity.get('type', '')
-        if etype not in MAX_TAG_MAP:
-            continue
-        tag_name = MAX_TAG_MAP[etype]
-        url = entity.get('url', '') if etype in ('link', 'text_link', 'url') else None
-        if etype in ('link', 'text_link', 'url') and url:
-            url = url.replace('"', '&quot;')
-        events.append((offset, tag_name, url, 1))   # открытие
-        events.append((offset + length, tag_name, url, -1))  # закрытие
+        boundaries.add(entity['from'])
+        boundaries.add(entity['from'] + entity['length'])
 
-    # Сортируем события:
-    # 1. По позиции
-    # 2. На одной позиции: закрытие перед открытием
-    # 3. Открытие: по приоритету тега (a > u > s > b > i)
-    # 4. Закрытие: обратный порядок
-    def event_sort_key(e):
-        pos, tag_name, url, action = e
-        if action == -1:  # закрытие
-            return (pos, 0, 0, 0)
-        else:  # открытие
-            tag_priority = TAG_ORDER.get(tag_name, 99)
-            return (pos, 1, tag_priority, 0)
+    boundaries = sorted(boundaries)
 
-    events.sort(key=event_sort_key)
+    # === Шаг 2: Для каждого сегмента определяем активные теги ===
+    segments = []  # [(start, end, [tags])]
+    
+    for i in range(len(boundaries) - 1):
+        seg_start = boundaries[i]
+        seg_end = boundaries[i + 1]
+        mid_point = (seg_start + seg_end) // 2  # любая точка внутри сегмента
+        
+        active_tags = []
+        for entity in corrected_markup:
+            ent_start = entity['from']
+            ent_end = entity['from'] + entity['length']
+            if ent_start <= mid_point < ent_end:
+                etype = entity.get('type', '')
+                if etype in MAX_TAG_MAP:
+                    tag_name = MAX_TAG_MAP[etype]
+                    url = entity.get('url', '') if etype in ('link', 'text_link', 'url') else None
+                    active_tags.append((tag_name, url, TAG_PRIORITY.get(tag_name, 99)))
+        
+        # Сортируем по приоритету (внешние → внутренние)
+        active_tags.sort(key=lambda x: x[2])
+        
+        if seg_end > seg_start:
+            segments.append((seg_start, seg_end, active_tags))
 
+    # === Шаг 3: Собираем результат ===
     result = []
-    pos = 0
-    open_tags = []  # стек: [(tag_name, url, unique_id)]
-
-    for evt in events:
-        evt_pos, tag_name, url, action = evt
-
-        # Добавляем текст до события
-        if evt_pos > pos:
-            result.append(text[pos:evt_pos])
-            pos = evt_pos
-
-        if action == 1:  # Открытие
-            if url:
-                result.append(f'<{tag_name} href="{url}">')
+    
+    for seg_start, seg_end, tags in segments:
+        segment_text = text[seg_start:seg_end]
+        if not segment_text:
+            continue
+        
+        # Открываем теги (внешние → внутренние)
+        for tag_name, url, _ in tags:
+            if tag_name == 'a' and url:
+                result.append(f'<a href="{url}">')
             else:
                 result.append(f'<{tag_name}>')
-            open_tags.append(tag_name)
-
-        else:  # Закрытие
-            # Закрываем все теги от вершины стека до нашего тега (LIFO)
-            temp_closed = []
-            found = False
-            while open_tags:
-                top = open_tags.pop()
-                result.append(f'</{top}>')
-                temp_closed.append(top)
-                if top == tag_name:
-                    found = True
-                    break
-
-            if not found:
-                # Тег не найден в стеке — значит уже был закрыт, игнорируем
-                logger.warning(f"Tag </{tag_name}> not found in stack, skipping")
-
-            # Открываем обратно те, что закрыли, но не являются целевым
-            for t in reversed(temp_closed[:-1]):  # кроме последнего (целевого)
-                if t in MAX_TAG_MAP.values():
-                    result.append(f'<{t}>')
-                    open_tags.append(t)
-
-    # Добавляем остаток текста
-    if pos < len(text):
-        result.append(text[pos:])
-
-    # Закрываем все оставшиеся открытые теги
-    for t in reversed(open_tags):
-        result.append(f'</{t}>')
+        
+        # Текст сегмента
+        result.append(segment_text)
+        
+        # Закрываем теги (внутренние → внешние = обратный порядок)
+        for tag_name, url, _ in reversed(tags):
+            result.append(f'</{tag_name}>')
 
     final_text = ''.join(result)
     logger.info(f"Output length: {len(final_text)}")
