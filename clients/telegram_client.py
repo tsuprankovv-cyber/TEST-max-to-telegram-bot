@@ -6,7 +6,7 @@ import aiohttp
 from typing import Dict, Optional, List
 from config.settings import TG_TOKEN, TG_CHAT
 from config.logging_config import get_logger, LOG_RAW_TG
-from utils.html_utils import fix_broken_html
+# from utils.html_utils import fix_broken_html  # отключено — markup_converter выдаёт правильный HTML
 from utils.transliterator import safe_filename
 
 logger = get_logger(__name__)
@@ -55,7 +55,6 @@ class TelegramClient:
     async def send_message(self, chat_id: str, text: str, reply_markup: Optional[Dict] = None) -> bool:
         if not text:
             return True
-        text = fix_broken_html(text)
         payload = {
             'chat_id': chat_id,
             'text': text,
@@ -72,7 +71,6 @@ class TelegramClient:
         form = aiohttp.FormData()
         form.add_field('chat_id', chat_id)
         
-        # Читаем файл в память перед отправкой, чтобы избежать "I/O operation on closed file"
         with open(file_path, 'rb') as f:
             file_data = f.read()
         
@@ -100,7 +98,6 @@ class TelegramClient:
             form.add_field(field, media_data, filename=fname)
 
         if caption:
-            caption = fix_broken_html(caption)
             form.add_field('caption', caption)
             form.add_field('parse_mode', 'HTML')
 
