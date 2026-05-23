@@ -4,40 +4,74 @@ from config.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# Регулярка для поиска HTML-тегов (открывающих, закрывающих, самозакрывающихся)
-TAG_RE = re.compile(r'</?[a-zA-Z][^>]*>')
+# === HTML utils for safe splitting ===
 
-def _count_open_tags(text: str) -> int:
-    """Считает баланс открытых/закрытых HTML-тегов."""
-    open_count = len(re.findall(r'<[a-zA-Z][^>/][^>]*>', text))
-    close_count = len(re.findall(r'</[a-zA-Z][^>]*>', text))
-    return open_count - close_count
+def _get_open_tags(text: str) -> List[str]:
+    """Возвращает список имён открытых тегов в порядке открытия."""
+    tags = []
+    for match in re.finditer(r'<([a-zA-Z]+)[^>/]*>', text):
+        tags.append(match.group(1))
+    return tags
 
-def _close_open_tags(text: str, balance: int) -> str:
-    """Закрывает открытые теги в конце текста."""
-    # Находим все открытые теги в тексте
-    open_tags = re.findall(r'<([a-zA-Z]+)[^>/]*>', text)
-    # Добавляем закрывающие в обратном порядке
-    for tag in reversed(open_tags[-balance:]):
+def _get_close_tags(text: str) -> List[str]:
+    """Возвращает список имён закрытых тегов."""
+    tags = []
+    for match in re.finditer(r'</([a-zA-Z]+)>', text):
+        tags.append(match.group(1))
+    return tags
+
+def _get_unclosed_tags(text: str) -> List[str]:
+    """Возвращает стек незакрытых тегов (LIFO)."""
+    stack = []
+    # Находим все теги по порядку
+    for match in re.finditer(r'</?([a-zA-Z]+)[^>]*>', text):
+        full_tag = match.group(0)
+        tag_name = match.group(1)
+        if full_tag.startswith('</'):
+            # Закрывающий — убираем из стека
+            if stack and stack[-1] == tag_name:
+                stack.pop()
+        else:
+            # Открывающий
+            stack.append(tag_name)
+    return stack
+
+def _close_tags(text: str, unclosed: List[str]) -> str:
+    """Добавляет закрывающие теги в правильном порядке (LIFO)."""
+    for tag in reversed(unclosed):
         text += f'</{tag}>'
     return text
 
-def _fix_split_point(text: str) -> str:
-    """Убирает висящие закрывающие теги в начале текста."""
-    # Находим закрывающие теги без открывающих в начале
-    result = text
-    # Простая эвристика: если текст начинается с </...> — это остаток от разбивки
-    while result.startswith('</'):
-        end_pos = result.find('>') + 1
-        if end_pos > 0:
-            result = result[end_pos:].strip()
-        else:
-            break
-    return result
+def _open_tags(text: str, unclosed: List[str]) -> str:
+    """Добавляет открывающие теги в начале текста."""
+    for tag in unclosed:
+        text = f'<{tag}>' + text
+    return text
+
+def _strip_orphan_close_tags(text: str) -> str:
+    """Убирает закрывающие теги без открывающих в начале текста."""
+    # Находим все закрывающие теги в начале
+    changed = True
+    while changed:
+        changed = False
+        match = re.match(r'^(</[a-zA-Z]+>)+', text)
+        if match:
+            # Проверяем, есть ли для них открывающие дальше
+            prefix = match.group(0)
+            rest = text[len(prefix):]
+            # Убираем только если это явные сироты
+            text = rest.lstrip()
+            changed = True
+    return text
 
 
 def split_smart_text(text: str, max_len: int = 1000) -> List[str]:
-    """Разделяет текст, сохраняя целостность HTML-тегов."""
+    """
+    Разделяет длинный текст на части, сохраняя целостность HTML-тегов.
+    - Не разрезает посередине тега
+    - Если абзац содержит незакрытые теги, переносит его целиком в новую часть
+    - При разбивке внутри абзаца корректно закрывает/открывает теги
+    """
     if len(text) <= max_len:
         return [text]
 
@@ -47,52 +81,72 @@ def split_smart_text(text: str, max_len: int = 1000) -> List[str]:
     paragraphs = text.split('\n\n')
 
     current = ""
-    current_balance = 0  # баланс тегов в current
+    current_unclosed = []  # Стек незакрытых тегов в current
 
     for para in paragraphs:
-        para_len = len(para)
-        para_balance = _count_open_tags(para)
+        para = para.strip('\n')
+        if not para:
+            continue
 
-        # Если абзац помещается целиком
+        para_len = len(para)
+        para_unclosed = _get_unclosed_tags(para)
+
+        # Если абзац помещается в текущую часть
         if len(current) + para_len + 2 <= max_len:
-            current = (current + '\n\n' + para) if current else para
-            current_balance += para_balance
+            if current:
+                current += '\n\n' + para
+            else:
+                current = para
+            # Обновляем стек незакрытых тегов
+            current_unclosed = _get_unclosed_tags(current)
+
         else:
             # Сохраняем текущую часть
             if current:
-                if current_balance > 0:
-                    current = _close_open_tags(current, current_balance)
+                # Закрываем все незакрытые теги перед разделением
+                if current_unclosed:
+                    current = _close_tags(current, current_unclosed)
                 parts.append(current)
 
             # Если абзац сам по себе длинный — режем по предложениям
             if para_len > max_len:
                 sentences = re.split(r'(?<=[.!?])\s+', para)
                 current = ""
-                current_balance = 0
+                current_unclosed = []
                 for sent in sentences:
-                    sent_balance = _count_open_tags(sent)
-                    if len(current) + len(sent) + 1 <= max_len:
-                        current = (current + ' ' + sent) if current else sent
-                        current_balance += sent_balance
+                    sent = sent.strip()
+                    if not sent:
+                        continue
+                    sent_len = len(sent)
+                    if len(current) + sent_len + 1 <= max_len:
+                        if current:
+                            current += ' ' + sent
+                        else:
+                            current = sent
                     else:
                         if current:
-                            if current_balance > 0:
-                                current = _close_open_tags(current, current_balance)
+                            # Закрываем теги перед сохранением
+                            unclosed = _get_unclosed_tags(current)
+                            if unclosed:
+                                current = _close_tags(current, unclosed)
                             parts.append(current)
+                        # Новый кусок — открываем теги, которые были активны
+                        unclosed = _get_unclosed_tags(current) if current else []
                         current = sent
-                        current_balance = sent_balance
+                        if unclosed:
+                            current = _open_tags(current, unclosed)
+                current_unclosed = _get_unclosed_tags(current) if current else []
             else:
+                # Абзац короткий, но не влезает — начинаем новую часть
                 current = para
-                current_balance = para_balance
+                current_unclosed = para_unclosed
 
     # Последняя часть
     if current:
-        if current_balance > 0:
-            current = _close_open_tags(current, current_balance)
         parts.append(current)
 
-    # Убираем висящие закрывающие теги в начале каждой части
-    parts = [_fix_split_point(p) for p in parts]
+    # Убираем сиротские закрывающие теги в начале каждой части
+    parts = [_strip_orphan_close_tags(p) for p in parts if p.strip()]
 
     logger.info(f"Split into {len(parts)} parts")
     for i, part in enumerate(parts):
