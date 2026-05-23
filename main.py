@@ -45,7 +45,10 @@ def log_structure():
 
 async def telegram_polling():
     """Фоновый опрос Telegram API для команд."""
-    from handlers.commands import handle_logs_command, handle_status_command, handle_logs_callback
+    from handlers.commands import (
+        handle_logs_command, handle_status_command, handle_logs_callback,
+        handle_start_command
+    )
     import aiohttp
     
     logger.info("📡 Starting Telegram polling for commands...")
@@ -79,9 +82,12 @@ async def telegram_polling():
                                 continue
                             
                             logger.info(f"[POLLING] 📨 Command: {text}")
-                            if text == '/logs':
+                            
+                            if text == '/start':
+                                await handle_start_command(chat_id)
+                            elif text == '/logs' or text == '📊 Логи':
                                 await handle_logs_command(chat_id)
-                            elif text == '/status':
+                            elif text == '/status' or text == '📈 Статус':
                                 await handle_status_command(chat_id)
                         
                         elif 'callback_query' in update:
@@ -98,7 +104,7 @@ async def main():
     setup_logging()
     
     logger.info("=" * 100)
-    logger.info("🚀 MAX → TELEGRAM FORWARDER [MODULAR v3]")
+    logger.info("🚀 MAX → TELEGRAM FORWARDER [MODULAR v4]")
     logger.info("=" * 100)
     logger.info(f"📡 MAX Channel: {MAX_CHAN}")
     logger.info(f"📥 Telegram Chat: {TG_CHAT}")
@@ -109,17 +115,14 @@ async def main():
     
     log_structure()
 
-    # Регистрация MAX webhook
     mx = MaxClient()
     if RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
         success = await mx.register_webhook(webhook_url, MAX_WEBHOOK_SECRET)
         logger.info(f"📡 MAX Webhook: {'✅ OK' if success else '❌ FAILED'}")
 
-    # Запуск Telegram polling для команд
     asyncio.create_task(telegram_polling())
 
-    # Запуск веб-сервера
     app = await create_app()
     runner = web.AppRunner(app)
     await runner.setup()
