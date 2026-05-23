@@ -9,6 +9,16 @@ logger = get_logger(__name__)
 
 tg = TelegramClient()
 
+# Постоянное меню (Reply Keyboard) — всегда висит внизу
+MAIN_MENU = {
+    'keyboard': [
+        [{'text': '📊 Логи'}, {'text': '📈 Статус'}],
+    ],
+    'resize_keyboard': True,
+    'persistent': True
+}
+
+# Кнопки выбора периода (Inline Keyboard) — появляются после нажатия "Логи"
 LOG_PERIOD_BUTTONS = {
     'inline_keyboard': [
         [{'text': '📅 За сегодня', 'callback_data': 'logs:today'}],
@@ -18,6 +28,20 @@ LOG_PERIOD_BUTTONS = {
         [{'text': '🕐 За последний час', 'callback_data': 'logs:1h'}],
     ]
 }
+
+
+async def handle_start_command(chat_id: str):
+    """Отправляет приветственное сообщение и постоянное меню."""
+    await tg.send_message(
+        chat_id,
+        "👋 <b>Бот для управления MAX→TG</b>\n\n"
+        "Используйте кнопки ниже:\n"
+        "📊 <b>Логи</b> — получить логи бота\n"
+        "📈 <b>Статус</b> — информация о боте",
+        reply_markup=MAIN_MENU
+    )
+    logger.info(f"[START] Menu sent to {chat_id}")
+
 
 async def handle_logs_command(chat_id: str):
     logger.info(f"[LOGS] 📊 Logs requested from chat_id={chat_id}")
@@ -33,6 +57,7 @@ async def handle_logs_command(chat_id: str):
         reply_markup=LOG_PERIOD_BUTTONS
     )
     logger.info("[LOGS] ✅ Menu sent")
+
 
 async def handle_logs_callback(callback_query: dict):
     callback_id = callback_query.get('id')
@@ -74,16 +99,17 @@ async def handle_logs_callback(callback_query: dict):
         os.unlink(filename)
         logger.info(f"[LOGS] 🗑️ Temp file deleted: {filename}")
 
+
 async def handle_status_command(chat_id: str):
     logger.info(f"[STATUS] 📊 Status requested from chat_id={chat_id}")
 
     from config.settings import MAX_CHAN, TG_CHAT
     status_text = "📊 <b>Статус бота:</b>\n\n"
     status_text += "✅ Бот активен\n"
-    status_text += "🧩 Версия: modular-v2\n"
+    status_text += "🧩 Версия: modular-v3\n"
     status_text += f"📡 MAX канал: <code>{MAX_CHAN}</code>\n"
     status_text += f"📥 TG чат: <code>{TG_CHAT}</code>\n"
     status_text += f"👤 Admin ID: {ADMIN_TG_ID if ADMIN_TG_ID else '❌ не задан'}\n"
 
-    await tg.send_message(chat_id, status_text)
+    await tg.send_message(chat_id, status_text, reply_markup=MAIN_MENU)
     logger.info("[STATUS] ✅ Status sent")
